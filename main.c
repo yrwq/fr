@@ -10,6 +10,51 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+// dynamic vec for repo paths
+typedef struct {
+    char **items;
+    size_t count;
+    size_t cap;
+} repo_vec_t;
+
+static repo_vec_t repos;
+
+static void vec_init(repo_vec_t *v) {
+    v->items = NULL;
+    v->count = 0;
+    v->cap = 0;
+}
+
+static void vec_free(repo_vec_t *v) {
+    for (size_t i = 0; i < v->count; i++) {
+        free(v->items[i]);
+    }
+    free(v->items);
+}
+
+// add item to vector
+static void vec_push(repo_vec_t *v, const char *str) {
+    if (v->count >= v->cap) {
+        size_t new_cap = v->cap == 0 ? 16 : v->cap * 2;
+        char **new_items = realloc(v->items, new_cap * sizeof(char *));
+        if (!new_items) return;
+        v->items = new_items;
+        v->cap = new_cap;
+    }
+
+    v->items[v->count] = strdup(str);
+    if (v->items[v->count]) {
+        v->count++;
+    }
+}
+
+// print all items
+static void vec_print(const repo_vec_t *v) {
+    for (size_t i = 0; i < v->count; i++) {
+        puts(v->items[i]);
+    }
+}
+
 static int is_dir(const char *path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
@@ -49,11 +94,10 @@ static void find_repos(const char *path, size_t len) {
 
         char child[PATH_MAX];
         if (!build_path(child, sizeof child, path, ent->d_name)) continue;
-
         if (!is_dir(child)) continue;
 
         if (is_repo(child)) {
-            puts(child + len + 1);
+            vec_push(&repos, child + len + 1);
         } else {
             find_repos(child, len);
         }
@@ -75,9 +119,13 @@ int main(int argc, char *argv[]) {
     char can[PATH_MAX];
 
     if (!realpath(start, can)) {
+        fprintf(stderr, "failed to resolve path: %s\n", start);
         return 0;
     }
 
+    vec_init(&repos);
     find_repos(can, strlen(can));
+    vec_print(&repos);
+    vec_free(&repos);
     return 0;
 }
