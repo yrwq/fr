@@ -251,7 +251,7 @@ int main(int argc, char *argv[]) {
         snprintf(start, sizeof start, "%s", argv[1]);
     } else {
         const char *home = getenv("HOME");
-        snprintf(start, sizeof start, "%s/dev", home);
+        snprintf(start, sizeof start, "%s", home);
     }
 
     char can[PATH_MAX];
