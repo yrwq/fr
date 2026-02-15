@@ -62,11 +62,15 @@ static void find_repos(const char *path, size_t len) {
 }
 
 
-int main() {
+int main(int argc, char *argv[]) {
     char start[PATH_MAX];
 
-    const char *home = getenv("HOME");
-    snprintf(start, sizeof start, "%s/dev", home);
+    if (argc == 2) {
+        snprintf(start, sizeof start, "%s", argv[1]);
+    } else {
+        const char *home = getenv("HOME");
+        snprintf(start, sizeof start, "%s/dev", home);
+    }
 
     char can[PATH_MAX];
 
