@@ -53,7 +53,7 @@ static void find_repos(const char *path, size_t len) {
         if (!is_dir(child)) continue;
 
         if (is_repo(child)) {
-            printf("%s\n", child);
+            puts(child + len + 1);
         } else {
             find_repos(child, len);
         }
