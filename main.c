@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <pthread.h>
-#include <semaphore.h>
 
 #define MAX_THREADS 8
 
@@ -22,8 +21,29 @@ typedef struct {
     pthread_mutex_t lock;
 } repo_vec_t;
 
+// queue of dirs to process
+typedef struct dir_node {
+    char path[PATH_MAX];
+    struct dir_node *next;
+} dir_node_t;
+
+typedef struct {
+    dir_node_t *head;
+    dir_node_t *tail;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int active_workers;
+    int pending_items;
+    int shutdown;
+} dir_queue_t;
+
 static repo_vec_t repos;
-static sem_t thread_limit;
+static dir_queue_t queue;
+static size_t base_len;
+
+/*
+   vec functions
+ */
 
 static void vec_init(repo_vec_t *v) {
     v->items = NULL;
@@ -47,7 +67,7 @@ static void vec_push(repo_vec_t *v, const char *str) {
         size_t new_cap = v->cap == 0 ? 16 : v->cap * 2;
         char **new_items = realloc(v->items, new_cap * sizeof(char *));
         if (!new_items) {
-            pthread_mutex_lock(&v->lock);
+            pthread_mutex_unlock(&v->lock);
             return;
         }
         v->items = new_items;
@@ -68,6 +88,92 @@ static void vec_print(const repo_vec_t *v) {
         puts(v->items[i]);
     }
 }
+
+/*
+   queue functions
+ */
+
+static void queue_init(dir_queue_t *q) {
+    q->head = NULL;
+    q->tail = NULL;
+    pthread_mutex_init(&q->lock, NULL);
+    pthread_cond_init(&q->cond, NULL);
+    q->active_workers = 1;
+    q->pending_items = 0;
+    q->shutdown = 0;
+}
+
+static void queue_push(dir_queue_t *q, const char *path) {
+    dir_node_t *node = malloc(sizeof(*node));
+    if (!node) return;
+    
+    snprintf(node->path, sizeof(node->path), "%s", path);
+    node->next = NULL;
+    
+    pthread_mutex_lock(&q->lock);
+    if (q->tail) {
+        q->tail->next = node;
+    } else {
+        q->head = node;
+    }
+    q->pending_items++;
+    q->tail = node;
+    pthread_cond_signal(&q->cond);
+    pthread_mutex_unlock(&q->lock);
+}
+
+static dir_node_t *queue_pop(dir_queue_t *q) {
+    pthread_mutex_lock(&q->lock);
+    
+    while (!q->head && !q->shutdown) {
+        if (q->active_workers == 0 && q->pending_items == 0) {
+            q->shutdown = 1;
+            pthread_cond_broadcast(&q->cond);
+            pthread_mutex_unlock(&q->lock);
+            return NULL;
+        }
+        pthread_cond_wait(&q->cond, &q->lock);
+    }
+    
+    if (q->shutdown) {
+        pthread_mutex_unlock(&q->lock);
+        return NULL;
+    }
+    
+    dir_node_t *node = q->head;
+    q->head = node->next;
+    if (!q->head) {
+        q->tail = NULL;
+    }
+    q->active_workers++;
+    q->pending_items--;
+    
+    pthread_mutex_unlock(&q->lock);
+    return node;
+}
+
+static void queue_finish_work(dir_queue_t *q) {
+    pthread_mutex_lock(&q->lock);
+    q->active_workers--;
+    
+    // no workers, signal shutdown
+    if (q->active_workers == 0 && !q->head) {
+        q->shutdown = 1;
+        pthread_cond_broadcast(&q->cond);
+    } else {
+        pthread_cond_signal(&q->cond);
+    }
+    pthread_mutex_unlock(&q->lock);
+}
+
+static void queue_destroy(dir_queue_t *q) {
+    pthread_mutex_destroy(&q->lock);
+    pthread_cond_destroy(&q->cond);
+}
+
+/*
+   helper functions
+ */
 
 static int is_dir(const char *path) {
     struct stat st;
@@ -95,16 +201,9 @@ static int is_repo(const char *path) {
     return is_dir(buf);
 }
 
-// forward
-static void *find_repos_thread(void *arg);
+// process one dir - find repos and queue subdirs
 
-typedef struct {
-    char path[PATH_MAX];
-    size_t len;
-} thread_arg_t;
-
-// recursively find repos in dir tree
-static void find_repos(const char *path, size_t len) {
+static void process_directory(const char *path) {
     DIR *dir = opendir(path);
     if (!dir) return;
 
@@ -116,47 +215,31 @@ static void find_repos(const char *path, size_t len) {
         if (!is_dir(child)) continue;
 
         if (is_repo(child)) {
-            // relative path to vec
-            vec_push(&repos, child + len + 1);
-        } else {
-            // try to spawn async thread for subdir
-            if (sem_trywait(&thread_limit) == 0) {
-                thread_arg_t *arg = malloc(sizeof(*arg));
-                if (arg) {
-                    snprintf(arg->path, sizeof(arg->path), "%s", child);
-                    arg->len = len;
-                    pthread_t tid;
-                    pthread_attr_t attr;
-                    pthread_attr_init(&attr);
-                    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-
-                    if (pthread_create(&tid, &attr, find_repos_thread, arg) == 0) {
-                        pthread_attr_destroy(&attr);
-                        // spawned thread
-                        continue;
-                    }
-
-                    // failed to create thread
-                    pthread_attr_destroy(&attr);
-                    free(arg);
-                    sem_post(&thread_limit);
-                }
-            }
-
-            // no threads available, or failed to spawn
-            // process synchronously
-            find_repos(child, len);
+            // found repo - add to results
+            vec_push(&repos, child + base_len + 1);
+            // queue subdir
         }
+        queue_push(&queue, child);
     }
     closedir(dir);
 }
 
-static void *find_repos_thread(void *arg) {
-    thread_arg_t *ta = arg;
-    find_repos(ta->path, ta->len);
-    free(ta);
-    // release thread slot
-    sem_post(&thread_limit);
+
+static void *worker_thread(void *arg) {
+    (void)arg;
+    
+    while (1) {
+        dir_node_t *node = queue_pop(&queue);
+        // shutdown
+        if (!node) {
+            break;
+        }
+        process_directory(node->path);
+        free(node);
+        
+        queue_finish_work(&queue);
+    }
+    
     return NULL;
 }
 
@@ -172,32 +255,34 @@ int main(int argc, char *argv[]) {
     }
 
     char can[PATH_MAX];
-
     if (!realpath(start, can)) {
-        fprintf(stderr, "failed to resolve path: %s\n", start);
         return 0;
     }
 
+    base_len = strlen(can);
+
     vec_init(&repos);
-    sem_init(&thread_limit, 0, MAX_THREADS);
+    queue_init(&queue);
 
-    // reserve one slot for main search
-    sem_wait(&thread_limit);
 
-    find_repos(can, strlen(can));
-
-    // release main slot
-    sem_post(&thread_limit);
-
-    // wait for all threads to complete
-    // acquire all slots means all threads are done
+    pthread_t threads[MAX_THREADS];
     for (int i = 0; i < MAX_THREADS; i++) {
-        sem_wait(&thread_limit);
+        pthread_create(&threads[i], NULL, worker_thread, NULL);
+    }
+
+    process_directory(can);
+
+    pthread_mutex_lock(&queue.lock);
+    queue.active_workers--;
+    pthread_cond_broadcast(&queue.cond);
+    pthread_mutex_unlock(&queue.lock);
+
+    for (int i = 0; i < MAX_THREADS; i++) {
+        pthread_join(threads[i], NULL);
     }
 
     vec_print(&repos);
-
     vec_free(&repos);
-    sem_destroy(&thread_limit);
+    queue_destroy(&queue);
     return 0;
 }
