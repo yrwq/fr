@@ -10,12 +10,20 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <git2.h>
 
 #define MAX_THREADS 8
+
+// repo info
+typedef struct {
+    char *path;
+    char branch[256];
+} repo_info_t;
 
 // dynamic vec for repo paths
 typedef struct {
     char **items;
+    repo_info_t *infos;
     size_t count;
     size_t cap;
     pthread_mutex_t lock;
@@ -44,11 +52,38 @@ static size_t base_len;
 static int max_depth = -1;
 
 /*
+   repo functions
+ */
+
+static int get_repo_info(const char *repo_path, repo_info_t *info) {
+    git_repository *repo = NULL;
+
+    if (git_repository_open(&repo, repo_path) != 0) {
+        return -1;
+    }
+
+    // current branch
+    git_reference *head = NULL;
+    if (git_repository_head(&head, repo) == 0) {
+        const char *branch_name = git_reference_shorthand(head);
+        snprintf(info->branch, sizeof(info->branch), "%s", branch_name);
+        git_reference_free(head);
+    } else {
+        snprintf(info->branch, sizeof(info->branch), "HEAD");
+    }
+
+    git_repository_free(repo);
+
+    return 0;
+}
+
+/*
    vec functions
  */
 
 static void vec_init(repo_vec_t *v) {
     v->items = NULL;
+    v->infos = NULL;
     v->count = 0;
     v->cap = 0;
     pthread_mutex_init(&v->lock, NULL);
@@ -59,25 +94,32 @@ static void vec_free(repo_vec_t *v) {
         free(v->items[i]);
     }
     free(v->items);
+    free(v->infos);
     pthread_mutex_destroy(&v->lock);
 }
 
 // add item to vector
-static void vec_push(repo_vec_t *v, const char *str) {
+static void vec_push(repo_vec_t *v, const char *str, const char *full_path) {
     pthread_mutex_lock(&v->lock);
+
     if (v->count >= v->cap) {
         size_t new_cap = v->cap == 0 ? 16 : v->cap * 2;
         char **new_items = realloc(v->items, new_cap * sizeof(char *));
-        if (!new_items) {
+        repo_info_t *new_infos = realloc(v->infos, new_cap * sizeof(repo_info_t));
+
+        if (!new_items || !new_infos) {
             pthread_mutex_unlock(&v->lock);
             return;
         }
         v->items = new_items;
+        v->infos = new_infos;
         v->cap = new_cap;
     }
 
     v->items[v->count] = strdup(str);
     if (v->items[v->count]) {
+        memset(&v->infos[v->count], 0, sizeof(repo_info_t));
+        get_repo_info(full_path, &v->infos[v->count]);
         v->count++;
     }
 
@@ -85,9 +127,21 @@ static void vec_push(repo_vec_t *v, const char *str) {
 }
 
 // print all items
-static void vec_print(const repo_vec_t *v) {
+static void vec_print(const repo_vec_t *v, int width, int mode) {
     for (size_t i = 0; i < v->count; i++) {
-        puts(v->items[i]);
+        const char *name = strrchr(v->items[i], '/');
+        const char *display = name ? name + 1 : v->items[i];
+        
+        size_t len = strlen(display);
+        if (mode == 1) {
+            printf("/home/yrwq/%s\n", v->items[i]);
+        } else {
+            if (len > (size_t)width) {
+                printf("%.*s..  %s\n", width - 2, display, v->infos[i].branch);
+            } else {
+                printf("%-*s  %s\n", width, display, v->infos[i].branch);
+            }
+        }
     }
 }
 
@@ -219,7 +273,7 @@ static void process_directory(const char *path, int depth) {
 
         if (is_repo(child)) {
             // found repo - add to results
-            vec_push(&repos, child + base_len + 1);
+            vec_push(&repos, child + base_len + 1, child);
         }
         
         // only queue subdirectories if we haven't reached max depth
@@ -251,6 +305,7 @@ static void *worker_thread(void *arg) {
 
 int main(int argc, char *argv[]) {
     char start[PATH_MAX];
+    int width = 15;
 
     // parse arguments
     int arg_idx = 2;
@@ -275,6 +330,7 @@ int main(int argc, char *argv[]) {
 
     base_len = strlen(can);
 
+    git_libgit2_init();
     vec_init(&repos);
     queue_init(&queue);
 
@@ -295,8 +351,9 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    vec_print(&repos);
+    vec_print(&repos, width, 0);
     vec_free(&repos);
     queue_destroy(&queue);
+    git_libgit2_shutdown();
     return 0;
 }

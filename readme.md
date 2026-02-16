@@ -2,6 +2,10 @@
 
 a cli tool to recursively find repositories in your directories
 
+requirements:
+
+- `libgit2`
+
 usage:
 
 ```sh

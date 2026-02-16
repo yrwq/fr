@@ -5,9 +5,10 @@ SRC = main.c
 ifdef DEBUG
 CFLAGS = -std=c99 -Wall -Wextra -Werror -pedantic -g -O0 \
          -fsanitize=address -fsanitize=undefined \
-         -fno-omit-frame-pointer -fno-optimize-sibling-calls
+         -fno-omit-frame-pointer -fno-optimize-sibling-calls \
+		 -pthread -lgit2
 else
-CFLAGS = -std=c99 -Wall -Wextra -Werror -pedantic -O2
+CFLAGS = -std=c99 -Wall -Wextra -Werror -pedantic -O2 -pthread -lgit2
 endif
 
 .PHONY: all
