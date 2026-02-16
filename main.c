@@ -14,6 +14,14 @@
 
 #define MAX_THREADS 8
 
+// args
+typedef struct {
+    char path[PATH_MAX];
+    int max_depth;
+    int max_width;
+} args_t;
+
+
 // repo info
 typedef struct {
     char *path;
@@ -302,33 +310,88 @@ static void *worker_thread(void *arg) {
     return NULL;
 }
 
+static void print_usage(const char *prog) {
+    fprintf(stderr, "usage: %s <opts> [dir]\n", prog);
+    fprintf(stderr, "opts:\n");
+    fprintf(stderr, "  -d <depth>  max depth to search (def: unlimited)\n");
+    fprintf(stderr, "  -w <width   max width for repo names (def: 10)\n");
+    fprintf(stderr, "  -h          show this help message\n");
+    fprintf(stderr, "\nif [dir] is not provided, defaults to $HOME\n");
+}
 
-int main(int argc, char *argv[]) {
-    char start[PATH_MAX];
-    int width = 15;
-
-    // parse arguments
-    int arg_idx = 2;
-    if (argc > arg_idx && strcmp(argv[arg_idx], "-d") == 0) {
-        if (argc > arg_idx + 1) {
-            max_depth = atoi(argv[arg_idx + 1]);
-            arg_idx += 2;
+static int parse_args(int argc, char *argv[], args_t *args) {
+    // Set defaults
+    args->max_depth = -1;
+    args->max_width = 10;
+    args->path[0] = '\0';
+    
+    int i = 1;
+    while (i < argc) {
+        if (strcmp(argv[i], "-d") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: -d requires an argument\n");
+                return -1;
+            }
+            args->max_depth = atoi(argv[i + 1]);
+            if (args->max_depth < 0) {
+                fprintf(stderr, "error: depth must be non-negative\n");
+                return -1;
+            }
+            i += 2;
+        } else if (strcmp(argv[i], "-w") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: -w requires an argument\n");
+                return -1;
+            }
+            args->max_width = atoi(argv[i + 1]);
+            i += 2;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 1;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+            print_usage(argv[0]);
+            return -1;
+        } else {
+            // Must be the directory argument
+            if (args->path[0] != '\0') {
+                fprintf(stderr, "error: multiple directories specified\n");
+                return -1;
+            }
+            snprintf(args->path, sizeof(args->path), "%s", argv[i]);
+            i++;
         }
     }
-
-    if (argc > arg_idx) {
-        snprintf(start, sizeof start, "%s", argv[arg_idx]);
-    } else {
+    
+    // no path specified
+    if (args->path[0] == '\0') {
         const char *home = getenv("HOME");
-        snprintf(start, sizeof start, "%s", home);
+        if (!home) {
+            fprintf(stderr, "Error: HOME environment variable not set\n");
+            return -1;
+        }
+        snprintf(args->path, sizeof(args->path), "%s", home);
     }
+    
+    return 0;
+}
 
+int main(int argc, char *argv[]) {
+    args_t args;
+    
+    int parse_result = parse_args(argc, argv, &args);
+    if (parse_result != 0) {
+        // 1 = help, -1 = error
+        return parse_result == 1 ? 0 : 1;
+    }
+    
     char can[PATH_MAX];
-    if (!realpath(start, can)) {
+    if (!realpath(args.path, can)) {
         return 0;
     }
 
     base_len = strlen(can);
+    max_depth = args.max_depth;
 
     git_libgit2_init();
     vec_init(&repos);
@@ -351,7 +414,7 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    vec_print(&repos, width, 0);
+    vec_print(&repos, args.max_width, 0);
     vec_free(&repos);
     queue_destroy(&queue);
     git_libgit2_shutdown();
