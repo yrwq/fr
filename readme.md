@@ -9,10 +9,13 @@ requirements:
 usage:
 
 ```sh
-fr [dir]
+fr <opts> [dir]
+opts:
+  -d <depth>  max depth to search (def: unlimited)
+  -w <width   max width for repo names (def: 10)
+  -h          show this help message
 
-# search only <n> level deep
-fr [dir] -d <n>
+if [dir] is not provided, defaults to $HOME
 ```
 
 running without args will search your whole home directory.
