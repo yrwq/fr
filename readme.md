@@ -18,8 +18,6 @@ opts:
 if [dir] is not provided, defaults to $HOME
 ```
 
-running without args will search your whole home directory.
-
 ```
 
 ⠀⠀⠀⠀⠀⠀⣀⣤⣶⣶⣿⢿⣿⣿⣷⣶⣦⣤⡀⠀
