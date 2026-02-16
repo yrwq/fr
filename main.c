@@ -24,6 +24,7 @@ typedef struct {
 // queue of dirs to process
 typedef struct dir_node {
     char path[PATH_MAX];
+    int depth;
     struct dir_node *next;
 } dir_node_t;
 
@@ -40,6 +41,7 @@ typedef struct {
 static repo_vec_t repos;
 static dir_queue_t queue;
 static size_t base_len;
+static int max_depth = -1;
 
 /*
    vec functions
@@ -103,11 +105,12 @@ static void queue_init(dir_queue_t *q) {
     q->shutdown = 0;
 }
 
-static void queue_push(dir_queue_t *q, const char *path) {
+static void queue_push(dir_queue_t *q, const char *path, int depth) {
     dir_node_t *node = malloc(sizeof(*node));
     if (!node) return;
     
     snprintf(node->path, sizeof(node->path), "%s", path);
+    node->depth = depth;
     node->next = NULL;
     
     pthread_mutex_lock(&q->lock);
@@ -203,7 +206,7 @@ static int is_repo(const char *path) {
 
 // process one dir - find repos and queue subdirs
 
-static void process_directory(const char *path) {
+static void process_directory(const char *path, int depth) {
     DIR *dir = opendir(path);
     if (!dir) return;
 
@@ -217,9 +220,12 @@ static void process_directory(const char *path) {
         if (is_repo(child)) {
             // found repo - add to results
             vec_push(&repos, child + base_len + 1);
-            // queue subdir
         }
-        queue_push(&queue, child);
+        
+        // only queue subdirectories if we haven't reached max depth
+        if (max_depth == -1 || depth < max_depth) {
+            queue_push(&queue, child, depth + 1);
+        }
     }
     closedir(dir);
 }
@@ -230,11 +236,10 @@ static void *worker_thread(void *arg) {
     
     while (1) {
         dir_node_t *node = queue_pop(&queue);
-        // shutdown
         if (!node) {
             break;
         }
-        process_directory(node->path);
+        process_directory(node->path, node->depth);
         free(node);
         
         queue_finish_work(&queue);
@@ -247,8 +252,17 @@ static void *worker_thread(void *arg) {
 int main(int argc, char *argv[]) {
     char start[PATH_MAX];
 
-    if (argc == 2) {
-        snprintf(start, sizeof start, "%s", argv[1]);
+    // parse arguments
+    int arg_idx = 2;
+    if (argc > arg_idx && strcmp(argv[arg_idx], "-d") == 0) {
+        if (argc > arg_idx + 1) {
+            max_depth = atoi(argv[arg_idx + 1]);
+            arg_idx += 2;
+        }
+    }
+
+    if (argc > arg_idx) {
+        snprintf(start, sizeof start, "%s", argv[arg_idx]);
     } else {
         const char *home = getenv("HOME");
         snprintf(start, sizeof start, "%s", home);
@@ -267,10 +281,10 @@ int main(int argc, char *argv[]) {
 
     pthread_t threads[MAX_THREADS];
     for (int i = 0; i < MAX_THREADS; i++) {
-        pthread_create(&threads[i], NULL, worker_thread, NULL);
+        pthread_create(&threads[i], NULL, worker_thread, &max_depth);
     }
 
-    process_directory(can);
+    process_directory(can, 0);
 
     pthread_mutex_lock(&queue.lock);
     queue.active_workers--;
