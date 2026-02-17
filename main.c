@@ -19,6 +19,7 @@ typedef struct {
     char path[PATH_MAX];
     int max_depth;
     int max_width;
+    int mode;
 } args_t;
 
 
@@ -315,14 +316,16 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "opts:\n");
     fprintf(stderr, "  -d <depth>  max depth to search (def: unlimited)\n");
     fprintf(stderr, "  -w <width   max width for repo names (def: 10)\n");
+    fprintf(stderr, "  -c          run with clean mode (only shows full path) \n");
     fprintf(stderr, "  -h          show this help message\n");
     fprintf(stderr, "\nif [dir] is not provided, defaults to $HOME\n");
 }
 
 static int parse_args(int argc, char *argv[], args_t *args) {
-    // Set defaults
+    // set defaults
     args->max_depth = -1;
     args->max_width = 10;
+    args->mode = 0;
     args->path[0] = '\0';
     
     int i = 1;
@@ -344,6 +347,9 @@ static int parse_args(int argc, char *argv[], args_t *args) {
                 return -1;
             }
             args->max_width = atoi(argv[i + 1]);
+            i += 2;
+        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--clean") == 0) {
+            args->mode = 1;
             i += 2;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -414,7 +420,7 @@ int main(int argc, char *argv[]) {
         pthread_join(threads[i], NULL);
     }
 
-    vec_print(&repos, args.max_width, 0);
+    vec_print(&repos, args.max_width, args.mode);
     vec_free(&repos);
     queue_destroy(&queue);
     git_libgit2_shutdown();
