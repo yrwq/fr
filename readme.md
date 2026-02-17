@@ -24,7 +24,7 @@ examples:
 - get every repo in ~/dev, select with fzf then open it with neovim
 
 ```bash
-fr -c | fzf | xargs nvim
+nvim $(fr -c | fzf)
 ```
 
 ```
