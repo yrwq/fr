@@ -179,7 +179,7 @@ static void queue_init(dir_queue_t *q) {
     q->tail = NULL;
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->cond, NULL);
-    q->active_workers = 1;
+    q->active_workers = 0;
     q->pending_items = 0;
     q->shutdown = 0;
 }
@@ -272,6 +272,14 @@ static int is_git_dir_name(const char *name) {
     return strcmp(name, ".git") == 0;
 }
 
+static int should_prune_dir_name(const char *name) {
+    return strcmp(name, "node_modules") == 0 ||
+        strcmp(name, "target") == 0 ||
+        strcmp(name, ".venv") == 0 ||
+        strcmp(name, "dist") == 0 ||
+        strcmp(name, "build") == 0;
+}
+
 // safely built path
 static int build_path(char *buf, size_t buf_size,
         const char *dir, const char *name) {
@@ -281,7 +289,6 @@ static int build_path(char *buf, size_t buf_size,
 }
 
 // process one dir - find repos and queue subdirs
-
 static void process_directory(const char *path, int depth) {
     DIR *dir = opendir(path);
     if (!dir) return;
@@ -314,6 +321,7 @@ static void process_directory(const char *path, int depth) {
 
         char child[PATH_MAX];
         if (!build_path(child, sizeof child, path, ent->d_name)) continue;
+        if (should_prune_dir_name(ent->d_name)) continue;
 
         if (max_depth == -1 || depth <= max_depth) {
             queue_push(&queue, child, depth + 1);
@@ -357,7 +365,7 @@ static void print_usage(const char *prog) {
 static int parse_args(int argc, char *argv[], args_t *args) {
     // set defaults
     args->max_depth = -1;
-    args->max_width = 10;
+    args->max_width = 20;
     args->mode = 0;
     args->path[0] = '\0';
     
@@ -438,18 +446,12 @@ int main(int argc, char *argv[]) {
     vec_init(&repos);
     queue_init(&queue);
 
+    queue_push(&queue, can, 0);
 
     pthread_t threads[MAX_THREADS];
     for (int i = 0; i < MAX_THREADS; i++) {
         pthread_create(&threads[i], NULL, worker_thread, &max_depth);
     }
-
-    process_directory(can, 0);
-
-    pthread_mutex_lock(&queue.lock);
-    queue.active_workers--;
-    pthread_cond_broadcast(&queue.cond);
-    pthread_mutex_unlock(&queue.lock);
 
     for (int i = 0; i < MAX_THREADS; i++) {
         pthread_join(threads[i], NULL);
