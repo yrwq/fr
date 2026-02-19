@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 
@@ -267,6 +268,10 @@ static int is_dot_dir(const char *path) {
         (path[1] == '\0' || (path[1] == '.' && path[2] == '\0'));
 }
 
+static int is_git_dir_name(const char *name) {
+    return strcmp(name, ".git") == 0;
+}
+
 // safely built path
 static int build_path(char *buf, size_t buf_size,
         const char *dir, const char *name) {
@@ -290,14 +295,26 @@ static void process_directory(const char *path, int depth) {
 
     for (struct dirent *ent; (ent = readdir(dir)) != NULL;) {
         if (is_dot_dir(ent->d_name)) continue;
+        if (is_git_dir_name(ent->d_name)) continue;
+
+        int is_directory = 0;
+        if (ent->d_type == DT_DIR) {
+            is_directory = 1;
+        } else if (ent->d_type == DT_UNKNOWN) {
+            char child[PATH_MAX];
+            if (!build_path(child, sizeof child, path, ent->d_name)) continue;
+            if (is_dir(child)) is_directory = 1;
+        }
+        if (!is_directory) continue;
 
         char child[PATH_MAX];
         if (!build_path(child, sizeof child, path, ent->d_name)) continue;
-        if (!is_dir(child)) continue;
 
         if (is_repo(child)) {
             // found repo - add to results
             vec_push(&repos, child + base_len + 1, child);
+            // skip walking inside repos to avoid traversing massive trees
+            continue;
         }
         
         // only queue subdirectories if we haven't reached max depth
@@ -365,7 +382,7 @@ static int parse_args(int argc, char *argv[], args_t *args) {
             i += 2;
         } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--clean") == 0) {
             args->mode = 1;
-            i += 2;
+            i += 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
             return 1;
