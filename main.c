@@ -280,22 +280,27 @@ static int build_path(char *buf, size_t buf_size,
     return res < (int)buf_size;
 }
 
-// check if directory is a git repo
-static int is_repo(const char *path) {
-    char buf[PATH_MAX];
-    if (!build_path(buf, sizeof buf, path, ".git")) return 0;
-    return is_dir(buf);
-}
-
 // process one dir - find repos and queue subdirs
 
 static void process_directory(const char *path, int depth) {
     DIR *dir = opendir(path);
     if (!dir) return;
 
+    int found_git_dir = 0;
+
     for (struct dirent *ent; (ent = readdir(dir)) != NULL;) {
         if (is_dot_dir(ent->d_name)) continue;
-        if (is_git_dir_name(ent->d_name)) continue;
+
+        if (is_git_dir_name(ent->d_name)) {
+            if (ent->d_type == DT_DIR) {
+                found_git_dir = 1;
+            } else if (ent->d_type == DT_UNKNOWN) {
+                char git_path[PATH_MAX];
+                if (!build_path(git_path, sizeof git_path, path, ent->d_name)) continue;
+                if (is_dir(git_path)) found_git_dir = 1;
+            }
+            continue;
+        }
 
         int is_directory = 0;
         if (ent->d_type == DT_DIR) {
@@ -310,19 +315,15 @@ static void process_directory(const char *path, int depth) {
         char child[PATH_MAX];
         if (!build_path(child, sizeof child, path, ent->d_name)) continue;
 
-        if (is_repo(child)) {
-            // found repo - add to results
-            vec_push(&repos, child + base_len + 1, child);
-            // skip walking inside repos to avoid traversing massive trees
-            continue;
-        }
-        
-        // only queue subdirectories if we haven't reached max depth
-        if (max_depth == -1 || depth < max_depth) {
+        if (max_depth == -1 || depth <= max_depth) {
             queue_push(&queue, child, depth + 1);
         }
     }
     closedir(dir);
+
+    if (found_git_dir && depth > 0) {
+        vec_push(&repos, path + base_len + 1, path);
+    }
 }
 
 
