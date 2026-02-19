@@ -59,6 +59,7 @@ static repo_vec_t repos;
 static dir_queue_t queue;
 static size_t base_len;
 static int max_depth = -1;
+static int collect_repo_info = 1;
 
 /*
    repo functions
@@ -109,28 +110,42 @@ static void vec_free(repo_vec_t *v) {
 
 // add item to vector
 static void vec_push(repo_vec_t *v, const char *str, const char *full_path) {
+    char *item = strdup(str);
+    if (!item) return;
+
+    repo_info_t info;
+    memset(&info, 0, sizeof(info));
+    if (!collect_repo_info) {
+        info.branch[0] = '\0';
+    } else if (get_repo_info(full_path, &info) != 0) {
+        snprintf(info.branch, sizeof(info.branch), "HEAD");
+    }
+
     pthread_mutex_lock(&v->lock);
 
     if (v->count >= v->cap) {
         size_t new_cap = v->cap == 0 ? 16 : v->cap * 2;
         char **new_items = realloc(v->items, new_cap * sizeof(char *));
-        repo_info_t *new_infos = realloc(v->infos, new_cap * sizeof(repo_info_t));
-
-        if (!new_items || !new_infos) {
+        if (!new_items) {
             pthread_mutex_unlock(&v->lock);
+            free(item);
             return;
         }
         v->items = new_items;
+
+        repo_info_t *new_infos = realloc(v->infos, new_cap * sizeof(repo_info_t));
+        if (!new_infos) {
+            pthread_mutex_unlock(&v->lock);
+            free(item);
+            return;
+        }
         v->infos = new_infos;
         v->cap = new_cap;
     }
 
-    v->items[v->count] = strdup(str);
-    if (v->items[v->count]) {
-        memset(&v->infos[v->count], 0, sizeof(repo_info_t));
-        get_repo_info(full_path, &v->infos[v->count]);
-        v->count++;
-    }
+    v->items[v->count] = item;
+    v->infos[v->count] = info;
+    v->count++;
 
     pthread_mutex_unlock(&v->lock);
 }
@@ -398,8 +413,10 @@ int main(int argc, char *argv[]) {
 
     base_len = strlen(can);
     max_depth = args.max_depth;
+    collect_repo_info = (args.mode == 0);
 
     git_libgit2_init();
+
     vec_init(&repos);
     queue_init(&queue);
 
