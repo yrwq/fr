@@ -26,7 +26,6 @@ typedef struct {
 
 // repo info
 typedef struct {
-    char *path;
     char branch[256];
 } repo_info_t;
 
@@ -159,7 +158,7 @@ static void vec_print(const repo_vec_t *v, int width, int mode) {
         
         size_t len = strlen(display);
         if (mode == 1) {
-            printf("/home/yrwq/%s\n", v->items[i]);
+            printf("%s\n", v->items[i]);
         } else {
             if (len > (size_t)width) {
                 printf("%.*s..  %s\n", width - 2, display, v->infos[i].branch);
