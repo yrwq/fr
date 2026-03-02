@@ -68,6 +68,16 @@ static repo_vec_t repos;
 static dir_queue_t queue;
 static int max_depth = -1;
 static int collect_repo_info = 1;
+static int use_color = 0;
+
+#define COLOR_RESET "\033[0m"
+#define COLOR_BOLD "\033[1m"
+#define COLOR_GREEN "\033[32m"
+#define COLOR_YELLOW "\033[33m"
+#define COLOR_RED "\033[31m"
+#define COLOR_CYAN "\033[36m"
+#define COLOR_BLUE "\033[34m"
+#define COLOR_DIM "\033[90m"
 
 /*
    repo functions
@@ -107,23 +117,24 @@ static void format_repo_status(const status_summary_t *summary, repo_info_t *inf
         return;
     }
 
-    int written = 0;
     if (summary->has_conflicted) {
-        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
-                            "%sconflicted", written > 0 ? "," : "");
+        snprintf(info->status, sizeof(info->status), "conflicted");
+        return;
     }
     if (summary->has_staged) {
-        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
-                            "%sstaged", written > 0 ? "," : "");
+        snprintf(info->status, sizeof(info->status), "staged");
+        return;
     }
     if (summary->has_modified) {
-        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
-                            "%smodified", written > 0 ? "," : "");
+        snprintf(info->status, sizeof(info->status), "modified");
+        return;
     }
     if (summary->has_untracked) {
-        snprintf(info->status + written, sizeof(info->status) - (size_t)written,
-                 "%suntracked", written > 0 ? "," : "");
+        snprintf(info->status, sizeof(info->status), "untracked");
+        return;
     }
+
+    snprintf(info->status, sizeof(info->status), "unknown");
 }
 
 static int get_repo_info(const char *repo_path, repo_info_t *info) {
@@ -186,6 +197,65 @@ static int get_repo_info(const char *repo_path, repo_info_t *info) {
     git_repository_free(repo);
 
     return 0;
+}
+
+static const char *status_color(const char *status) {
+    if (!use_color) return "";
+    if (strcmp(status, "clean") == 0) return COLOR_GREEN;
+    if (strstr(status, "conflicted") != NULL) return COLOR_RED;
+    return COLOR_YELLOW;
+}
+
+static const char *name_color(void) {
+    return use_color ? COLOR_BOLD : "";
+}
+
+static const char *branch_color(void) {
+    return "";
+}
+
+static const char *path_color(void) {
+    return use_color ? COLOR_DIM : "";
+}
+
+static const char *upstream_color(void) {
+    return "";
+}
+
+static const char *color_reset(void) {
+    return use_color ? COLOR_RESET : "";
+}
+
+static void format_repo_name(char *buf, size_t buf_size, const char *display, size_t repo_width) {
+    size_t display_len = strlen(display);
+
+    if (buf_size == 0) return;
+
+    if (repo_width > 2 && display_len > repo_width) {
+        snprintf(buf, buf_size, "%.*s..", (int)(repo_width - 2), display);
+    } else {
+        snprintf(buf, buf_size, "%s", display);
+    }
+}
+
+static void format_home_relative_path(char *buf, size_t buf_size, const char *path) {
+    const char *home = getenv("HOME");
+    size_t home_len;
+
+    if (buf_size == 0) return;
+
+    if (!home || home[0] == '\0') {
+        snprintf(buf, buf_size, "%s", path);
+        return;
+    }
+
+    home_len = strlen(home);
+    if (strncmp(path, home, home_len) == 0 &&
+        (path[home_len] == '/' || path[home_len] == '\0')) {
+        snprintf(buf, buf_size, "~%s", path + home_len);
+    } else {
+        snprintf(buf, buf_size, "%s", path);
+    }
 }
 
 /*
@@ -256,18 +326,6 @@ static void vec_push(repo_vec_t *v, const char *full_path) {
 // print all items
 static void vec_print(const repo_vec_t *v, int width, int mode) {
     size_t repo_width = (size_t)width;
-    size_t status_width = 6;
-    size_t branch_width = 6;
-
-    if (mode != 1) {
-        for (size_t i = 0; i < v->count; i++) {
-            size_t status_len = strlen(v->infos[i].status);
-            size_t branch_len = strlen(v->infos[i].branch);
-
-            if (status_len > status_width) status_width = status_len;
-            if (branch_len > branch_width) branch_width = branch_len;
-        }
-    }
 
     for (size_t i = 0; i < v->count; i++) {
         const char *name = strrchr(v->items[i], '/');
@@ -276,28 +334,35 @@ static void vec_print(const repo_vec_t *v, int width, int mode) {
         if (mode == 1) {
             printf("%s\n", v->items[i]);
         } else {
+            char display_buf[PATH_MAX];
+            char path_buf[PATH_MAX];
+            const char *status = v->infos[i].status;
+            const char *branch = v->infos[i].branch;
             const char *upstream = v->infos[i].upstream[0] != '\0' ? v->infos[i].upstream : "-";
-            size_t display_len = strlen(display);
+            const char *name_prefix = name_color();
+            const char *status_prefix = status_color(status);
+            const char *branch_prefix = branch_color();
+            const char *path_prefix = path_color();
+            const char *upstream_prefix = upstream_color();
+            const char *reset = color_reset();
 
-            if (repo_width > 2 && display_len > repo_width) {
-                printf("%.*s..  %-*s  %-*s  %s\n",
-                       (int)(repo_width - 2),
-                       display,
-                       (int)status_width,
-                       v->infos[i].status,
-                       (int)branch_width,
-                       v->infos[i].branch,
-                       upstream);
-            } else {
-                printf("%-*s  %-*s  %-*s  %s\n",
-                       (int)repo_width,
-                       display,
-                       (int)status_width,
-                       v->infos[i].status,
-                       (int)branch_width,
-                       v->infos[i].branch,
-                       upstream);
+            format_repo_name(display_buf, sizeof(display_buf), display, repo_width);
+            format_home_relative_path(path_buf, sizeof(path_buf), v->items[i]);
+
+            printf("%s%s%s", name_prefix, display_buf, reset);
+            printf("  %s%s%s\n", path_prefix, path_buf, reset);
+            printf("  %s%s%s  %s(%s)%s\n",
+                   status_prefix,
+                   status,
+                   reset,
+                   branch_prefix,
+                   branch,
+                   reset);
+
+            if (strcmp(upstream, "-") != 0) {
+                printf("  %s%s%s\n", upstream_prefix, upstream, reset);
             }
+            printf("\n");
         }
     }
 }
@@ -571,6 +636,7 @@ int main(int argc, char *argv[]) {
 
     max_depth = args.max_depth;
     collect_repo_info = (args.mode == 0);
+    use_color = (args.mode == 0 && isatty(STDOUT_FILENO));
 
     git_libgit2_init();
 
