@@ -27,7 +27,16 @@ typedef struct {
 // repo info
 typedef struct {
     char branch[256];
+    char status[128];
+    char upstream[512];
 } repo_info_t;
+
+typedef struct {
+    int has_staged;
+    int has_modified;
+    int has_untracked;
+    int has_conflicted;
+} status_summary_t;
 
 // dynamic vec for repo paths
 typedef struct {
@@ -57,7 +66,6 @@ typedef struct {
 
 static repo_vec_t repos;
 static dir_queue_t queue;
-static size_t base_len;
 static int max_depth = -1;
 static int collect_repo_info = 1;
 
@@ -65,23 +73,116 @@ static int collect_repo_info = 1;
    repo functions
  */
 
+static int collect_repo_status(const char *path, unsigned int status_flags, void *payload) {
+    (void)path;
+
+    status_summary_t *summary = payload;
+    if (status_flags & GIT_STATUS_CONFLICTED) {
+        summary->has_conflicted = 1;
+    }
+    if (status_flags & (GIT_STATUS_INDEX_NEW |
+                        GIT_STATUS_INDEX_MODIFIED |
+                        GIT_STATUS_INDEX_DELETED |
+                        GIT_STATUS_INDEX_RENAMED |
+                        GIT_STATUS_INDEX_TYPECHANGE)) {
+        summary->has_staged = 1;
+    }
+    if (status_flags & (GIT_STATUS_WT_MODIFIED |
+                        GIT_STATUS_WT_DELETED |
+                        GIT_STATUS_WT_RENAMED |
+                        GIT_STATUS_WT_TYPECHANGE)) {
+        summary->has_modified = 1;
+    }
+    if (status_flags & GIT_STATUS_WT_NEW) {
+        summary->has_untracked = 1;
+    }
+
+    return 0;
+}
+
+static void format_repo_status(const status_summary_t *summary, repo_info_t *info) {
+    if (!summary->has_staged && !summary->has_modified &&
+        !summary->has_untracked && !summary->has_conflicted) {
+        snprintf(info->status, sizeof(info->status), "clean");
+        return;
+    }
+
+    int written = 0;
+    if (summary->has_conflicted) {
+        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
+                            "%sconflicted", written > 0 ? "," : "");
+    }
+    if (summary->has_staged) {
+        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
+                            "%sstaged", written > 0 ? "," : "");
+    }
+    if (summary->has_modified) {
+        written += snprintf(info->status + written, sizeof(info->status) - (size_t)written,
+                            "%smodified", written > 0 ? "," : "");
+    }
+    if (summary->has_untracked) {
+        snprintf(info->status + written, sizeof(info->status) - (size_t)written,
+                 "%suntracked", written > 0 ? "," : "");
+    }
+}
+
 static int get_repo_info(const char *repo_path, repo_info_t *info) {
     git_repository *repo = NULL;
+    git_reference *head = NULL;
+    git_reference *upstream = NULL;
+    git_remote *remote = NULL;
+    git_strarray remotes = {0};
+    git_buf remote_name = GIT_BUF_INIT;
+    status_summary_t summary = {0};
 
     if (git_repository_open(&repo, repo_path) != 0) {
         return -1;
     }
 
-    // current branch
-    git_reference *head = NULL;
+    snprintf(info->branch, sizeof(info->branch), "HEAD");
+    snprintf(info->status, sizeof(info->status), "unknown");
+    snprintf(info->upstream, sizeof(info->upstream), "-");
+
     if (git_repository_head(&head, repo) == 0) {
         const char *branch_name = git_reference_shorthand(head);
         snprintf(info->branch, sizeof(info->branch), "%s", branch_name);
-        git_reference_free(head);
-    } else {
-        snprintf(info->branch, sizeof(info->branch), "HEAD");
+
+        if (git_reference_is_branch(head) &&
+            git_branch_upstream(&upstream, head) == 0 &&
+            git_branch_remote_name(&remote_name, repo, git_reference_name(head)) == 0 &&
+            git_remote_lookup(&remote, repo, remote_name.ptr) == 0) {
+            const char *url = git_remote_url(remote);
+            if (url && url[0] != '\0') {
+                snprintf(info->upstream, sizeof(info->upstream), "%s", url);
+            }
+        }
     }
 
+    if (strcmp(info->upstream, "-") == 0 &&
+        git_remote_list(&remotes, repo) == 0 &&
+        remotes.count > 0 &&
+        git_remote_lookup(&remote, repo, remotes.strings[0]) == 0) {
+        const char *url = git_remote_url(remote);
+        if (url && url[0] != '\0') {
+            snprintf(info->upstream, sizeof(info->upstream), "%s", url);
+        }
+    }
+
+    git_status_options status_opts;
+    if (git_status_options_init(&status_opts, GIT_STATUS_OPTIONS_VERSION) == 0) {
+        status_opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+        status_opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED |
+                            GIT_STATUS_OPT_EXCLUDE_SUBMODULES;
+        if (git_status_foreach_ext(repo, &status_opts, collect_repo_status, &summary) == 0) {
+            format_repo_status(&summary, info);
+        }
+    }
+
+    git_remote_free(remote);
+    git_strarray_dispose(&remotes);
+    git_buf_dispose(&remote_name);
+    git_reference_free(upstream);
+    git_reference_free(head);
     git_repository_free(repo);
 
     return 0;
@@ -109,8 +210,8 @@ static void vec_free(repo_vec_t *v) {
 }
 
 // add item to vector
-static void vec_push(repo_vec_t *v, const char *str, const char *full_path) {
-    char *item = strdup(str);
+static void vec_push(repo_vec_t *v, const char *full_path) {
+    char *item = strdup(full_path);
     if (!item) return;
 
     repo_info_t info;
@@ -119,6 +220,8 @@ static void vec_push(repo_vec_t *v, const char *str, const char *full_path) {
         info.branch[0] = '\0';
     } else if (get_repo_info(full_path, &info) != 0) {
         snprintf(info.branch, sizeof(info.branch), "HEAD");
+        snprintf(info.status, sizeof(info.status), "unknown");
+        snprintf(info.upstream, sizeof(info.upstream), "-");
     }
 
     pthread_mutex_lock(&v->lock);
@@ -152,18 +255,48 @@ static void vec_push(repo_vec_t *v, const char *str, const char *full_path) {
 
 // print all items
 static void vec_print(const repo_vec_t *v, int width, int mode) {
+    size_t repo_width = (size_t)width;
+    size_t status_width = 6;
+    size_t branch_width = 6;
+
+    if (mode != 1) {
+        for (size_t i = 0; i < v->count; i++) {
+            size_t status_len = strlen(v->infos[i].status);
+            size_t branch_len = strlen(v->infos[i].branch);
+
+            if (status_len > status_width) status_width = status_len;
+            if (branch_len > branch_width) branch_width = branch_len;
+        }
+    }
+
     for (size_t i = 0; i < v->count; i++) {
         const char *name = strrchr(v->items[i], '/');
         const char *display = name ? name + 1 : v->items[i];
-        
-        size_t len = strlen(display);
+
         if (mode == 1) {
             printf("%s\n", v->items[i]);
         } else {
-            if (len > (size_t)width) {
-                printf("%.*s..  %s\n", width - 2, display, v->infos[i].branch);
+            const char *upstream = v->infos[i].upstream[0] != '\0' ? v->infos[i].upstream : "-";
+            size_t display_len = strlen(display);
+
+            if (repo_width > 2 && display_len > repo_width) {
+                printf("%.*s..  %-*s  %-*s  %s\n",
+                       (int)(repo_width - 2),
+                       display,
+                       (int)status_width,
+                       v->infos[i].status,
+                       (int)branch_width,
+                       v->infos[i].branch,
+                       upstream);
             } else {
-                printf("%-*s  %s\n", width, display, v->infos[i].branch);
+                printf("%-*s  %-*s  %-*s  %s\n",
+                       (int)repo_width,
+                       display,
+                       (int)status_width,
+                       v->infos[i].status,
+                       (int)branch_width,
+                       v->infos[i].branch,
+                       upstream);
             }
         }
     }
@@ -329,7 +462,7 @@ static void process_directory(const char *path, int depth) {
     closedir(dir);
 
     if (found_git_dir && depth > 0) {
-        vec_push(&repos, path + base_len + 1, path);
+        vec_push(&repos, path);
     }
 }
 
@@ -436,7 +569,6 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    base_len = strlen(can);
     max_depth = args.max_depth;
     collect_repo_info = (args.mode == 0);
 
