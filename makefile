@@ -1,21 +1,29 @@
 EXE = fr
 SRC = main.c
+OBJ = $(SRC:.c=.o)
 
-# debug with sanitizers
+CPPFLAGS =
+WARNFLAGS = -Wall -Wextra -Werror -pedantic
+CFLAGS = -std=c99 $(WARNFLAGS) -pthread
+LDFLAGS =
+LDLIBS = -lgit2
+
 ifdef DEBUG
-CFLAGS = -std=c99 -Wall -Wextra -Werror -pedantic -g -O0 \
-         -fsanitize=address -fsanitize=undefined \
-         -fno-omit-frame-pointer -fno-optimize-sibling-calls \
-		 -pthread -lgit2
+CFLAGS += -g -O0 -fsanitize=address -fsanitize=undefined \
+          -fno-omit-frame-pointer -fno-optimize-sibling-calls
+LDFLAGS += -fsanitize=address -fsanitize=undefined
 else
-CFLAGS = -std=c99 -Wall -Wextra -Werror -pedantic -O2 -pthread -lgit2
+CFLAGS += -O2
 endif
 
 .PHONY: all
 all: $(EXE)
 
-$(EXE): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $<
+$(EXE): $(OBJ)
+	$(CC) $(LDFLAGS) -o $@ $(OBJ) $(LDLIBS)
+
+%.o: %.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 
 .PHONY: run
@@ -28,8 +36,9 @@ debug:
 
 .PHONY: clean
 clean:
-	$(RM) $(EXE)
+	$(RM) $(EXE) $(OBJ)
 
 .PHONY: install
 install: $(EXE)
-	install -m 755 $(EXE) $(PREFIX)/bin/
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 $(EXE) $(DESTDIR)$(PREFIX)/bin/
